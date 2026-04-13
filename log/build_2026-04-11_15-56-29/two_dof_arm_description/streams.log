@@ -1,0 +1,48 @@
+[0.698s] Invoking command in '/home/dell/Internship_ws/src/two_dof_arm_description': PYTHONPATH=/home/dell/Internship_ws/build/two_dof_arm_description/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/dell/Internship_ws/install/two_dof_arm_description/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/two_dof_arm_description build --build-base /home/dell/Internship_ws/build/two_dof_arm_description/build install --record /home/dell/Internship_ws/build/two_dof_arm_description/install.log --single-version-externally-managed install_data
+[0.981s] running egg_info
+[0.981s] creating ../../build/two_dof_arm_description/two_dof_arm_description.egg-info
+[0.981s] writing ../../build/two_dof_arm_description/two_dof_arm_description.egg-info/PKG-INFO
+[0.982s] writing dependency_links to ../../build/two_dof_arm_description/two_dof_arm_description.egg-info/dependency_links.txt
+[0.982s] writing entry points to ../../build/two_dof_arm_description/two_dof_arm_description.egg-info/entry_points.txt
+[0.982s] writing requirements to ../../build/two_dof_arm_description/two_dof_arm_description.egg-info/requires.txt
+[0.982s] writing top-level names to ../../build/two_dof_arm_description/two_dof_arm_description.egg-info/top_level.txt
+[0.983s] writing manifest file '../../build/two_dof_arm_description/two_dof_arm_description.egg-info/SOURCES.txt'
+[0.986s] reading manifest file '../../build/two_dof_arm_description/two_dof_arm_description.egg-info/SOURCES.txt'
+[0.987s] writing manifest file '../../build/two_dof_arm_description/two_dof_arm_description.egg-info/SOURCES.txt'
+[0.987s] running build
+[0.988s] running build_py
+[0.988s] creating /home/dell/Internship_ws/build/two_dof_arm_description/build
+[0.988s] creating /home/dell/Internship_ws/build/two_dof_arm_description/build/lib
+[0.988s] creating /home/dell/Internship_ws/build/two_dof_arm_description/build/lib/two_dof_arm_description
+[0.988s] copying two_dof_arm_description/serial_imu_bridge.py -> /home/dell/Internship_ws/build/two_dof_arm_description/build/lib/two_dof_arm_description
+[0.988s] copying two_dof_arm_description/imu_to_joint_angles_v2.py -> /home/dell/Internship_ws/build/two_dof_arm_description/build/lib/two_dof_arm_description
+[0.988s] copying two_dof_arm_description/__init__.py -> /home/dell/Internship_ws/build/two_dof_arm_description/build/lib/two_dof_arm_description
+[0.988s] running install
+[0.989s] running install_lib
+[0.990s] creating /home/dell/Internship_ws/install/two_dof_arm_description/lib/python3.10/site-packages/two_dof_arm_description
+[0.990s] copying /home/dell/Internship_ws/build/two_dof_arm_description/build/lib/two_dof_arm_description/serial_imu_bridge.py -> /home/dell/Internship_ws/install/two_dof_arm_description/lib/python3.10/site-packages/two_dof_arm_description
+[0.990s] copying /home/dell/Internship_ws/build/two_dof_arm_description/build/lib/two_dof_arm_description/imu_to_joint_angles_v2.py -> /home/dell/Internship_ws/install/two_dof_arm_description/lib/python3.10/site-packages/two_dof_arm_description
+[0.990s] copying /home/dell/Internship_ws/build/two_dof_arm_description/build/lib/two_dof_arm_description/__init__.py -> /home/dell/Internship_ws/install/two_dof_arm_description/lib/python3.10/site-packages/two_dof_arm_description
+[0.990s] byte-compiling /home/dell/Internship_ws/install/two_dof_arm_description/lib/python3.10/site-packages/two_dof_arm_description/serial_imu_bridge.py to serial_imu_bridge.cpython-310.pyc
+[0.991s] byte-compiling /home/dell/Internship_ws/install/two_dof_arm_description/lib/python3.10/site-packages/two_dof_arm_description/imu_to_joint_angles_v2.py to imu_to_joint_angles_v2.cpython-310.pyc
+[0.992s] byte-compiling /home/dell/Internship_ws/install/two_dof_arm_description/lib/python3.10/site-packages/two_dof_arm_description/__init__.py to __init__.cpython-310.pyc
+[0.993s] running install_data
+[0.993s] creating /home/dell/Internship_ws/install/two_dof_arm_description/share/ament_index
+[0.993s] creating /home/dell/Internship_ws/install/two_dof_arm_description/share/ament_index/resource_index
+[0.993s] creating /home/dell/Internship_ws/install/two_dof_arm_description/share/ament_index/resource_index/packages
+[0.993s] copying resource/two_dof_arm_description -> /home/dell/Internship_ws/install/two_dof_arm_description/share/ament_index/resource_index/packages
+[0.993s] copying package.xml -> /home/dell/Internship_ws/install/two_dof_arm_description/share/two_dof_arm_description
+[0.993s] creating /home/dell/Internship_ws/install/two_dof_arm_description/share/two_dof_arm_description/launch
+[0.994s] copying launch/display.launch.py -> /home/dell/Internship_ws/install/two_dof_arm_description/share/two_dof_arm_description/launch
+[0.994s] creating /home/dell/Internship_ws/install/two_dof_arm_description/share/two_dof_arm_description/urdf
+[0.994s] copying urdf/human_arm_5dof.urdf -> /home/dell/Internship_ws/install/two_dof_arm_description/share/two_dof_arm_description/urdf
+[0.994s] creating /home/dell/Internship_ws/install/two_dof_arm_description/share/two_dof_arm_description/rviz
+[0.994s] copying rviz/arm_view.rviz -> /home/dell/Internship_ws/install/two_dof_arm_description/share/two_dof_arm_description/rviz
+[0.994s] running install_egg_info
+[0.995s] Copying ../../build/two_dof_arm_description/two_dof_arm_description.egg-info to /home/dell/Internship_ws/install/two_dof_arm_description/lib/python3.10/site-packages/two_dof_arm_description-2.0.0-py3.10.egg-info
+[0.996s] running install_scripts
+[1.015s] Installing imu_to_joint_angles script to /home/dell/Internship_ws/install/two_dof_arm_description/lib/two_dof_arm_description
+[1.015s] Installing imu_to_joint_angles_v2 script to /home/dell/Internship_ws/install/two_dof_arm_description/lib/two_dof_arm_description
+[1.015s] Installing serial_imu_bridge script to /home/dell/Internship_ws/install/two_dof_arm_description/lib/two_dof_arm_description
+[1.015s] writing list of installed files to '/home/dell/Internship_ws/build/two_dof_arm_description/install.log'
+[1.049s] Invoked command in '/home/dell/Internship_ws/src/two_dof_arm_description' returned '0': PYTHONPATH=/home/dell/Internship_ws/build/two_dof_arm_description/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/dell/Internship_ws/install/two_dof_arm_description/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/two_dof_arm_description build --build-base /home/dell/Internship_ws/build/two_dof_arm_description/build install --record /home/dell/Internship_ws/build/two_dof_arm_description/install.log --single-version-externally-managed install_data

@@ -1,0 +1,5 @@
+[console_scripts]
+imu_to_joint_angles = two_dof_arm_description.imu_to_joint_angles:main
+imu_to_joint_angles_v2 = two_dof_arm_description.imu_to_joint_angles_v2:main
+serial_imu_bridge = two_dof_arm_description.serial_imu_bridge:main
+
