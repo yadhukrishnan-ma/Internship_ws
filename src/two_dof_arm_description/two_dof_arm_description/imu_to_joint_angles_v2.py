@@ -2,129 +2,115 @@
 """
 imu_to_joint_angles_v2.py
 ═══════════════════════════════════════════════════════════════════
-UPGRADED ROS2 Node: 2 IMU Sensors → 5 Joint Angles
-Author : Upgraded for human-like 5-DOF arm
+ROS2 Node: 2 IMU Sensors → 5 Joint Angles + FK Wrist Position
 
-WHAT THIS NODE DOES
-───────────────────
-                IMU 1 (Shoulder)                IMU 2 (Elbow)
-                /imu_shoulder/data              /imu_elbow/data
-                        │                               │
-                        ▼                               ▼
-              Extract 3 Euler angles        Compute RELATIVE rotation
-              from quaternion               between both IMU quaternions
-                        │                               │
-               ┌────────┴───────┐              ┌────────┴───────┐
-               ▼        ▼       ▼              ▼                ▼
-          abduction  flexion rotation    elbow_flexion  forearm_rotation
-               │        │       │              │                │
-               └────────┴───────┴──────────────┴────────────────┘
-                                        │
-                                        ▼
-                         /joint_states  (5 angles published)
-                                        │
-                                        ▼
-                              robot_state_publisher
-                                        │
-                                        ▼
-                                 RViz / Gazebo
+PHASE 1 — IMU-ONLY FOUNDATION
+──────────────────────────────
+This is the core kinematics node for the right-arm motion mimicking
+system. It converts raw IMU quaternions into URDF joint angles.
+
+KEY DESIGN DECISIONS:
+  1. RELATIVE QUATERNION FOR ELBOW
+     The elbow IMU measures absolute orientation (includes shoulder).
+     To get the TRUE elbow bend, we compute:
+         q_elbow_relative = q_shoulder_inverse × q_elbow
+     This gives us ONLY the rotation between upper arm and forearm.
+
+  2. ZYX EULER DECOMPOSITION
+     The URDF joint chain is Z (abduction) → Y (flexion) → X (rotation).
+     quaternion_to_euler() extracts intrinsic XYZ = extrinsic ZYX,
+     which directly maps to the URDF joint order.
+
+  3. ADAPTIVE SMOOTHING
+     Uses velocity-dependent EMA alpha:
+     - Stationary: low alpha (heavy smoothing → no jitter)
+     - Moving: high alpha (light smoothing → responsive)
+
+  4. RIGHT ARM CONVENTION
+     This models a RIGHT arm. Positive shoulder_flexion = forward raise.
+     Positive elbow_flexion = bending arm toward shoulder.
 
 JOINT → IMU MAPPING TABLE
 ──────────────────────────
-Joint Name               | Source  | Euler Angle  | Axis
-─────────────────────────┼─────────┼──────────────┼──────
-shoulder_abduction_joint | IMU 1   | roll         | X
-shoulder_flexion_joint   | IMU 1   | pitch        | Y
-shoulder_rotation_joint  | IMU 1   | yaw          | Z
-elbow_flexion_joint      | Rel.    | pitch_rel     | Y
-forearm_rotation_joint   | Rel.    | roll_rel      | Z
-
-MATH: HOW WE GET 5 ANGLES FROM 2 QUATERNIONS
-─────────────────────────────────────────────
-
-STEP 1 — Shoulder angles (from IMU1 quaternion directly):
-  An IMU gives absolute orientation as quaternion q = (x, y, z, w).
-  We convert to Euler angles (roll, pitch, yaw) using ZYX convention:
-
-    roll  = atan2( 2(wy + xz),  1 - 2(y² + z²) )   → abduction
-    pitch = asin ( 2(wx - yz) )                      → flexion
-    yaw   = atan2( 2(wz + xy),  1 - 2(x² + z²) )    → rotation
-
-  These match shoulder DOF axes: X(abduction), Y(flexion), Z(rotation)
-
-STEP 2 — Relative rotation for elbow (from both quaternions):
-  The elbow angles describe how the FOREARM moves RELATIVE TO the
-  upper arm — not its absolute world orientation.
-
-  q_relative = q_shoulder_conjugate ⊗ q_elbow
-
-  The conjugate of q_shoulder is (−x, −y, −z, +w).
-  Multiplying gives the rotation "seen from the upper arm's frame".
-
-  From q_relative:
-    pitch_rel → elbow_flexion     (how much elbow is bent)
-    roll_rel  → forearm_rotation  (pronation / supination)
-
-USAGE
-─────
-  Terminal 1:  ros2 launch two_dof_arm_description display_5dof.launch.py
-  Terminal 2:  ros2 run two_dof_arm_description imu_to_joint_angles_v2
-  Terminal 3:  ros2 topic echo /joint_states   (verify 5 joints publishing)
+Joint Name               | Source            | Euler Angle | URDF Axis
+─────────────────────────┼───────────────────┼─────────────┼──────────
+shoulder_abduction_joint | IMU 1 (absolute)  | yaw         | Z
+shoulder_flexion_joint   | IMU 1 (absolute)  | pitch       | Y
+shoulder_rotation_joint  | IMU 1 (absolute)  | roll        | X
+elbow_flexion_joint      | IMU2 rel. to IMU1 | pitch       | Y
+forearm_rotation_joint   | IMU2 rel. to IMU1 | yaw         | Z
 ═══════════════════════════════════════════════════════════════════
 """
 
 import rclpy
 from rclpy.node import Node
 import math
+import time
 
 from sensor_msgs.msg import Imu, JointState
+from geometry_msgs.msg import PointStamped
+from std_msgs.msg import Empty, String
+import numpy as np
 
 
 # ─────────────────────────────────────────────────────────────────
-# JOINT LIMITS — must exactly match the URDF values
+# ARM GEOMETRY — measured from user's actual right arm
+# ─────────────────────────────────────────────────────────────────
+L_UPPER_ARM = 0.28    # shoulder to elbow (28 cm)
+L_FOREARM   = 0.26    # elbow to wrist (26 cm)
+
+
+# ─────────────────────────────────────────────────────────────────
+# JOINT LIMITS — synced with URDF (human_arm_5dof.urdf)
 # ─────────────────────────────────────────────────────────────────
 LIMITS = {
-    'shoulder_abduction_joint':  (-0.5236,  3.1416),   # -30°  to +180°
-    'shoulder_flexion_joint':    (-1.0472,  3.1416),   # -60°  to +180°
-    'shoulder_rotation_joint':   (-1.2217,  1.5708),   # -70°  to +90°
-    'elbow_flexion_joint':       ( 0.0000,  2.5307),   #   0°  to +145°
-    'forearm_rotation_joint':    (-1.5708,  1.5708),   # -90°  to +90°
+    'shoulder_abduction_joint':  (-3.1416,  3.1416),   # Z-axis: full rotation
+    'shoulder_flexion_joint':    (-1.5708,  2.6180),   # Y-axis: -90° to +150°
+    'shoulder_rotation_joint':   (-1.5708,  1.5708),   # X-axis: ±90°
+    'elbow_flexion_joint':       ( 0.0000,  2.5307),   # Y-axis: 0° to +145°
+    'forearm_rotation_joint':    (-1.5708,  1.5708),   # Z-axis: ±90°
 }
 
+# Number of calibration samples (averaged for stable reference)
+CALIBRATION_SAMPLES = 100
 
-def clamp(value: float, lo: float, hi: float) -> float:
-    """Clamp value between lo and hi."""
+# ─────────────────────────────────────────────────────────────────
+# ADAPTIVE SMOOTHING CONFIG
+# ─────────────────────────────────────────────────────────────────
+# Dead zone: Ignore changes smaller than ~1.5 degrees
+DEAD_ZONE_RAD = math.radians(1.5)
+
+# Adaptive EMA: alpha varies based on angular velocity
+EMA_ALPHA_MIN = 0.15    # Heavy smoothing when stationary → kills jitter
+EMA_ALPHA_MAX = 0.60    # Light smoothing when moving fast → responsive
+VELOCITY_THRESHOLD = 2.0  # rad/s — alpha ramps from MIN to MAX over this range
+
+
+def clamp(value, lo, hi):
     return max(lo, min(hi, value))
 
 
-def quaternion_to_euler(x: float, y: float, z: float, w: float):
+def quaternion_to_euler(x, y, z, w):
     """
-    Convert quaternion (x, y, z, w) → Euler angles (roll, pitch, yaw).
+    Quaternion (x,y,z,w) → Euler (roll, pitch, yaw) in radians.
 
-    Uses ZYX convention (most common for IMU sensors):
-      1. Yaw   around world Z-axis first
-      2. Pitch around new Y-axis
-      3. Roll  around final X-axis
+    Convention: Intrinsic X→Y→Z rotation = Extrinsic Z→Y→X
+    This matches the URDF joint chain:
+        shoulder_abduction (Z) → shoulder_flexion (Y) → shoulder_rotation (X)
 
-    Returns angles in RADIANS.
-
-    BEGINNER NOTE:
-      A quaternion is a 4-number encoding of rotation that avoids
-      "gimbal lock" (a problem where two rotation axes line up and
-      you lose a degree of freedom). We convert it to the familiar
-      roll/pitch/yaw (RPY) representation for joint angle mapping.
+    Returns: (roll, pitch, yaw) where:
+        roll  = rotation about X (maps to shoulder_rotation / forearm)
+        pitch = rotation about Y (maps to shoulder_flexion / elbow_flexion)
+        yaw   = rotation about Z (maps to shoulder_abduction / forearm_rotation)
     """
-    # Roll (rotation about X-axis)
     sinr_cosp = 2.0 * (w * x + y * z)
     cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
     roll = math.atan2(sinr_cosp, cosr_cosp)
 
-    # Pitch (rotation about Y-axis)
     sinp = 2.0 * (w * y - z * x)
-    sinp = max(-1.0, min(1.0, sinp))   # safe clamp for asin
+    sinp = max(-1.0, min(1.0, sinp))
     pitch = math.asin(sinp)
 
-    # Yaw (rotation about Z-axis)
     siny_cosp = 2.0 * (w * z + x * y)
     cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
     yaw = math.atan2(siny_cosp, cosy_cosp)
@@ -133,173 +119,121 @@ def quaternion_to_euler(x: float, y: float, z: float, w: float):
 
 
 def quaternion_multiply(q1, q2):
-    """
-    Multiply two quaternions: q_result = q1 ⊗ q2
-
-    Quaternion multiplication composes two rotations.
-    Result = apply q2 first, then q1.
-
-    q1 = (x1, y1, z1, w1)
-    q2 = (x2, y2, z2, w2)
-
-    Formula (Hamilton product):
-      w = w1*w2 - x1*x2 - y1*y2 - z1*z2
-      x = w1*x2 + x1*w2 + y1*z2 - z1*y2
-      y = w1*y2 - x1*z2 + y1*w2 + z1*x2
-      z = w1*z2 + x1*y2 - y1*x2 + z1*w2
-    """
+    """Multiply q1 ⊗ q2. Format: (x, y, z, w)."""
     x1, y1, z1, w1 = q1
     x2, y2, z2, w2 = q2
     return (
-        w1*x2 + x1*w2 + y1*z2 - z1*y2,   # x
-        w1*y2 - x1*z2 + y1*w2 + z1*x2,   # y
-        w1*z2 + x1*y2 - y1*x2 + z1*w2,   # z
-        w1*w2 - x1*x2 - y1*y2 - z1*z2    # w
+        w1*x2 + x1*w2 + y1*z2 - z1*y2,
+        w1*y2 - x1*z2 + y1*w2 + z1*x2,
+        w1*z2 + x1*y2 - y1*x2 + z1*w2,
+        w1*w2 - x1*x2 - y1*y2 - z1*z2
     )
 
 
 def quaternion_conjugate(q):
-    """
-    Compute the conjugate (inverse) of a unit quaternion.
-
-    For a unit quaternion (|q| = 1):
-      conjugate(x, y, z, w) = (-x, -y, -z, +w)
-
-    Multiplying q ⊗ conjugate(q) = identity (no rotation).
-    This is used to "undo" the shoulder rotation from the forearm
-    quaternion, giving us the RELATIVE rotation of the forearm
-    with respect to the upper arm.
-    """
+    """Conjugate (inverse for unit quaternion): (x,y,z,w) → (-x,-y,-z,w)."""
     x, y, z, w = q
     return (-x, -y, -z, w)
 
 
+def quaternion_normalize(q):
+    """Normalize quaternion to unit length."""
+    x, y, z, w = q
+    n = math.sqrt(x*x + y*y + z*z + w*w)
+    if n < 1e-10:
+        return (0.0, 0.0, 0.0, 1.0)
+    return (x/n, y/n, z/n, w/n)
+
+
+def quaternion_average(quats):
+    """
+    Average a list of quaternions using simple mean + normalize.
+    Good enough for small orientation spreads (calibration samples).
+    """
+    sx, sy, sz, sw = 0.0, 0.0, 0.0, 0.0
+    ref = quats[0]
+    for q in quats:
+        dot = q[0]*ref[0] + q[1]*ref[1] + q[2]*ref[2] + q[3]*ref[3]
+        if dot < 0:
+            sx -= q[0]; sy -= q[1]; sz -= q[2]; sw -= q[3]
+        else:
+            sx += q[0]; sy += q[1]; sz += q[2]; sw += q[3]
+    n = len(quats)
+    return quaternion_normalize((sx/n, sy/n, sz/n, sw/n))
+
+
+def compute_wrist_position(q1, q2, q3, q4, q5):
+    """
+    Forward Kinematics: 5 joint angles → wrist (x,y,z).
+    Matches URDF chain: Z(q1) → Y(q2) → X(q3) → translate(-Z) → Y(q4) → Z(q5) → translate(-Z)
+
+    Arm hangs straight down at rest (−Z direction).
+    """
+    def Rx(a):
+        c, s = math.cos(a), math.sin(a)
+        return np.array([[1,0,0,0],[0,c,-s,0],[0,s,c,0],[0,0,0,1]])
+    def Ry(a):
+        c, s = math.cos(a), math.sin(a)
+        return np.array([[c,0,s,0],[0,1,0,0],[-s,0,c,0],[0,0,0,1]])
+    def Rz(a):
+        c, s = math.cos(a), math.sin(a)
+        return np.array([[c,-s,0,0],[s,c,0,0],[0,0,1,0],[0,0,0,1]])
+    def Tz(d):
+        return np.array([[1,0,0,0],[0,1,0,0],[0,0,1,d],[0,0,0,1]])
+
+    # URDF chain: Rz(abd) @ Ry(flex) @ Rx(rot) @ Tz(-upper) @ Ry(elbow) @ Rz(forearm) @ Tz(-fore)
+    T = (Rz(q1) @ Ry(q2) @ Rx(q3)
+         @ Tz(-L_UPPER_ARM)
+         @ Ry(q4) @ Rz(q5)
+         @ Tz(-L_FOREARM))
+
+    return T[0, 3], T[1, 3], T[2, 3]
+
+
 class ImuToJointAnglesV2(Node):
-    """
-    Upgraded ROS2 node: 2 IMUs → 5 joint angles for human-like arm.
-
-    Subscribes:
-        /imu_shoulder/data   (sensor_msgs/Imu)
-        /imu_elbow/data      (sensor_msgs/Imu)
-
-    Publishes:
-        /joint_states        (sensor_msgs/JointState)
-        → 5 joints: shoulder_abduction, shoulder_flexion,
-                    shoulder_rotation, elbow_flexion, forearm_rotation
-    """
 
     def __init__(self):
         super().__init__('imu_to_joint_angles_v2')
 
         self.get_logger().info(
             '\n'
-            '╔══════════════════════════════════════════╗\n'
-            '║   5-DOF Human Arm IMU Node  (v2)         ║\n'
-            '╠══════════════════════════════════════════╣\n'
-            '║  Subscribing to:                         ║\n'
-            '║    /imu_shoulder/data                    ║\n'
-            '║    /imu_elbow/data                       ║\n'
-            '║  Publishing to:                          ║\n'
-            '║    /joint_states  (5 joints)             ║\n'
-            '╚══════════════════════════════════════════╝'
+            '╔════════════════════════════════════════════════════════╗\n'
+            '║   5-DOF Right Arm IMU Node  (Phase 1 — IMU Only)      ║\n'
+            '╠════════════════════════════════════════════════════════╣\n'
+            '║  Shoulder: absolute orientation from IMU1              ║\n'
+            '║  Elbow:    RELATIVE rotation (IMU2 vs IMU1)            ║\n'
+            '║  → No shoulder leak into elbow joints!                 ║\n'
+            '║  Direct quaternion input (no Euler conversion loss)    ║\n'
+            '║  Adaptive EMA smoothing (velocity-dependent)           ║\n'
+            '║  Multi-sample calibration ({} samples)                 ║\n'
+            '╚════════════════════════════════════════════════════════╝'.format(
+                CALIBRATION_SAMPLES
+            )
         )
 
-        # ── Store latest IMU quaternions ───────────────────────────
-        # Format: (x, y, z, w) — matches ROS sensor_msgs/Imu.orientation
-        self.q_shoulder = (0.0, 0.0, 0.0, 1.0)   # identity = no rotation
+        # ── Calibration state ─────────────────────────────────────
+        self.q_ref_shoulder = None
+        self.q_ref_elbow    = None
+        self.calibrated = False
+
+        # Buffers for multi-sample calibration
+        self.cal_shoulder_buf = []
+        self.cal_elbow_buf = []
+
+        # ── Latest IMU quaternions (x, y, z, w) ──────────────────
+        self.q_shoulder = (0.0, 0.0, 0.0, 1.0)
         self.q_elbow    = (0.0, 0.0, 0.0, 1.0)
 
-        # ── Current joint angles (radians) ────────────────────────
-        self.shoulder_abduction = 0.0
-        self.shoulder_flexion   = 0.0
-        self.shoulder_rotation  = 0.0
-        self.elbow_flexion      = 0.0
-        self.forearm_rotation   = 0.0
+        # ── Current target angles (raw from IMUs) ─────────────────
+        self.target_joints = [0.0, 0.0, 0.0, 0.0, 0.0]
 
-        # ── Subscribers ────────────────────────────────────────────
-        self.sub_shoulder = self.create_subscription(
-            Imu, '/imu_shoulder/data',
-            self.shoulder_callback, 10)
+        # ── Smoothed output angles ────────────────────────────────
+        self.smooth_joints = [0.0, 0.0, 0.0, 0.0, 0.0]
 
-        self.sub_elbow = self.create_subscription(
-            Imu, '/imu_elbow/data',
-            self.elbow_callback, 10)
+        # ── Timing for adaptive smoothing ─────────────────────────
+        self.last_publish_time = time.time()
 
-        # ── Publisher ──────────────────────────────────────────────
-        self.pub_joints = self.create_publisher(JointState, '/joint_states', 10)
-
-        # ── Publish timer: 50 Hz ───────────────────────────────────
-        self.timer = self.create_timer(0.02, self.publish_joint_states)
-
-    # ──────────────────────────────────────────────────────────────
-    def shoulder_callback(self, msg: Imu):
-        """
-        Process shoulder IMU data → 3 shoulder joint angles.
-
-        The shoulder IMU is mounted on the upper arm.
-        Its ABSOLUTE orientation in the world frame directly encodes
-        all 3 shoulder angles via Euler angle decomposition.
-
-        Mapping (ZYX Euler decomposition):
-          roll  (about X) → shoulder_abduction_joint
-          pitch (about Y) → shoulder_flexion_joint
-          yaw   (about Z) → shoulder_rotation_joint
-        """
-        q = msg.orientation
-        self.q_shoulder = (q.x, q.y, q.z, q.w)
-
-        # Decompose quaternion into 3 Euler angles
-        roll, pitch, yaw = quaternion_to_euler(q.x, q.y, q.z, q.w)
-
-        # Map to joint angles with clamping to URDF limits
-        lo, hi = LIMITS['shoulder_abduction_joint']
-        self.shoulder_abduction = clamp(roll, lo, hi)
-
-        lo, hi = LIMITS['shoulder_flexion_joint']
-        self.shoulder_flexion = clamp(pitch, lo, hi)
-
-        lo, hi = LIMITS['shoulder_rotation_joint']
-        self.shoulder_rotation = clamp(yaw, lo, hi)
-
-    # ──────────────────────────────────────────────────────────────
-    def elbow_callback(self, msg: Imu):
-        """
-        Process elbow IMU data → 2 elbow/forearm joint angles.
-
-        By user request: We treat the IMUs as INDEPENDENT. 
-        We do NOT subtract the shoulder's orientation. 
-        Roll/Pitch of the elbow IMU maps directly to the elbow joints.
-        """
-        q = msg.orientation
-        self.q_elbow = (q.x, q.y, q.z, q.w)
-
-        # Extract Euler angles directly from the elbow IMU quaternion
-        roll, pitch, yaw = quaternion_to_euler(q.x, q.y, q.z, q.w)
-
-        # Map to joint angles with clamping
-        lo, hi = LIMITS['elbow_flexion_joint']
-        self.elbow_flexion = clamp(pitch, lo, hi)
-
-        # Map roll to forearm rotation
-        lo, hi = LIMITS['forearm_rotation_joint']
-        self.forearm_rotation = clamp(roll, lo, hi)
-
-    # ──────────────────────────────────────────────────────────────
-    def publish_joint_states(self):
-        """
-        Publish all 5 joint angles as a JointState message at 50 Hz.
-
-        The robot_state_publisher reads this and updates the TF tree,
-        which causes the 3D robot model to move in RViz and Gazebo.
-
-        CRITICAL: Joint names here MUST exactly match the URDF joint names.
-        Even one typo will cause that joint to silently stay at 0°.
-        """
-        msg = JointState()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = ''
-
-        msg.name = [
+        self.joint_names = [
             'shoulder_abduction_joint',
             'shoulder_flexion_joint',
             'shoulder_rotation_joint',
@@ -307,22 +241,232 @@ class ImuToJointAnglesV2(Node):
             'forearm_rotation_joint',
         ]
 
-        msg.position = [
-            self.shoulder_abduction,
-            self.shoulder_flexion,
-            self.shoulder_rotation,
-            self.elbow_flexion,
-            self.forearm_rotation,
-        ]
+        # ── Calibration status ────────────────────────────────────
+        self.cal_state = 'WARMING_UP'  # WARMING_UP → COLLECTING → CALIBRATED
 
-        # Not controlling velocity or effort, just position
-        msg.velocity = [0.0, 0.0, 0.0, 0.0, 0.0]
-        msg.effort   = [0.0, 0.0, 0.0, 0.0, 0.0]
+        # ── ROS2 interfaces ──────────────────────────────────────
+        self.create_subscription(Imu, '/imu_shoulder/data', self.shoulder_cb, 10)
+        self.create_subscription(Imu, '/imu_elbow/data', self.elbow_cb, 10)
+        self.create_subscription(Empty, '/calibrate_imu', self.calibrate_cb, 10)
 
+        self.pub_joints = self.create_publisher(JointState, '/joint_states', 10)
+        self.pub_wrist  = self.create_publisher(PointStamped, '/wrist_position', 10)
+        self.pub_cal_status = self.create_publisher(String, '/calibration_status', 10)
+
+        self.fk_log_counter = 0
+        self.timer = self.create_timer(0.01, self.publish_joint_states)  # 100 Hz
+        self.cal_status_timer = self.create_timer(1.0, self.publish_cal_status)
+
+        self.start_time = None
+        self.warmup_time_sec = 7.0
+
+        self.get_logger().info(
+            f'⏳ Waiting {self.warmup_time_sec}s for IMU Madgwick filter to stabilize...'
+        )
+        self.get_logger().info(
+            '──────────────────────────────────────────────────────────\n'
+            '  RIGHT ARM — Direction Reference:\n'
+            '  • Raise arm FORWARD  → shoulder_flexion (+pitch)\n'
+            '  • Raise arm SIDEWAYS → shoulder_abduction (+yaw)\n'
+            '  • Rotate upper arm   → shoulder_rotation (+roll)\n'
+            '  • Bend elbow         → elbow_flexion (+pitch, 0→145°)\n'
+            '  • Rotate forearm     → forearm_rotation (+yaw)\n'
+            '──────────────────────────────────────────────────────────'
+        )
+
+    # ──────────────────────────────────────────────────────────────
+    def calibrate(self):
+        """Multi-sample calibration: average quaternions for stable ref."""
+        if len(self.cal_shoulder_buf) >= CALIBRATION_SAMPLES and \
+           len(self.cal_elbow_buf) >= CALIBRATION_SAMPLES:
+            self.q_ref_shoulder = quaternion_average(self.cal_shoulder_buf)
+            self.q_ref_elbow    = quaternion_average(self.cal_elbow_buf)
+        else:
+            # Fallback: single-sample calibration
+            self.q_ref_shoulder = self.q_shoulder
+            self.q_ref_elbow    = self.q_elbow
+
+        self.calibrated = True
+        self.cal_state = 'CALIBRATED'
+        self.target_joints = [0.0, 0.0, 0.0, 0.0, 0.0]
+        self.smooth_joints = [0.0, 0.0, 0.0, 0.0, 0.0]
+
+        self.get_logger().info(
+            f'✅ CALIBRATED! (from {len(self.cal_shoulder_buf)} samples)\n'
+            f'   Shoulder ref: ({self.q_ref_shoulder[0]:.4f}, '
+            f'{self.q_ref_shoulder[1]:.4f}, '
+            f'{self.q_ref_shoulder[2]:.4f}, '
+            f'{self.q_ref_shoulder[3]:.4f})\n'
+            f'   Elbow ref:    ({self.q_ref_elbow[0]:.4f}, '
+            f'{self.q_ref_elbow[1]:.4f}, '
+            f'{self.q_ref_elbow[2]:.4f}, '
+            f'{self.q_ref_elbow[3]:.4f})\n'
+            '── System is now LIVE — move your arm! ──────────────────'
+        )
+
+    def calibrate_cb(self, msg):
+        """Manual recalibration via /calibrate_imu topic."""
+        self.get_logger().info('🔄 Manual recalibration! Hold arm straight down...')
+        self.calibrated = False
+        self.cal_state = 'COLLECTING'
+        self.cal_shoulder_buf.clear()
+        self.cal_elbow_buf.clear()
+
+    def publish_cal_status(self):
+        """Publish calibration state for external monitoring."""
+        msg = String()
+        if self.cal_state == 'WARMING_UP':
+            elapsed = 0.0
+            if self.start_time is not None:
+                elapsed = time.time() - self.start_time
+            remaining = max(0, self.warmup_time_sec - elapsed)
+            msg.data = f'WARMING_UP remaining={remaining:.1f}s'
+        elif self.cal_state == 'COLLECTING':
+            s_count = len(self.cal_shoulder_buf)
+            e_count = len(self.cal_elbow_buf)
+            msg.data = f'COLLECTING shoulder={s_count}/{CALIBRATION_SAMPLES} elbow={e_count}/{CALIBRATION_SAMPLES}'
+        else:
+            msg.data = 'CALIBRATED'
+        self.pub_cal_status.publish(msg)
+
+    def get_calibrated_quat(self, q_raw, q_ref):
+        """
+        Get the GLOBAL world rotation applied since calibration:
+            q_calibrated = q_raw ⊗ q_ref_conjugate
+        """
+        return quaternion_multiply(q_raw, quaternion_conjugate(q_ref))
+
+    # ──────────────────────────────────────────────────────────────
+    def shoulder_cb(self, msg):
+        q = msg.orientation
+        self.q_shoulder = (q.x, q.y, q.z, q.w)
+
+        if self.start_time is None:
+            self.start_time = time.time()
+
+        elapsed = time.time() - self.start_time
+        if elapsed < self.warmup_time_sec:
+            return
+
+        if not self.calibrated:
+            if len(self.cal_shoulder_buf) == 0:
+                self.cal_state = 'COLLECTING'
+                self.get_logger().info(
+                    '⏳ Warmup complete! Hold arm STRAIGHT DOWN for calibration... '
+                    f'(collecting {CALIBRATION_SAMPLES} samples)'
+                )
+
+            self.cal_shoulder_buf.append(self.q_shoulder)
+            if (len(self.cal_shoulder_buf) >= CALIBRATION_SAMPLES and
+                    len(self.cal_elbow_buf) >= CALIBRATION_SAMPLES):
+                self.calibrate()
+            elif len(self.cal_shoulder_buf) % 25 == 0:
+                self.get_logger().info(
+                    f'   Calibrating... {len(self.cal_shoulder_buf)}/'
+                    f'{CALIBRATION_SAMPLES} shoulder samples'
+                )
+            return
+
+        # ── SHOULDER: absolute orientation relative to calibration ─
+        q_cal = self.get_calibrated_quat(self.q_shoulder, self.q_ref_shoulder)
+        roll, pitch, yaw = quaternion_to_euler(*q_cal)
+
+        lo, hi = LIMITS['shoulder_abduction_joint']
+        self.target_joints[0] = clamp(yaw, lo, hi)
+
+        lo, hi = LIMITS['shoulder_flexion_joint']
+        self.target_joints[1] = clamp(pitch, lo, hi)
+
+        lo, hi = LIMITS['shoulder_rotation_joint']
+        self.target_joints[2] = clamp(roll, lo, hi)
+
+    # ──────────────────────────────────────────────────────────────
+    def elbow_cb(self, msg):
+        q = msg.orientation
+        self.q_elbow = (q.x, q.y, q.z, q.w)
+
+        if self.start_time is None:
+            return  # Wait for shoulder to set the global start_time
+
+        elapsed = time.time() - self.start_time
+        if elapsed < self.warmup_time_sec:
+            return
+
+        if not self.calibrated:
+            self.cal_elbow_buf.append(self.q_elbow)
+            return
+
+        # ── ELBOW: RELATIVE rotation between forearm and upper arm ─
+        q_shoulder_cal = self.get_calibrated_quat(
+            self.q_shoulder, self.q_ref_shoulder)
+
+        q_elbow_cal = self.get_calibrated_quat(
+            self.q_elbow, self.q_ref_elbow)
+
+        # q_relative = q_shoulder_inverse × q_elbow
+        # This gives us ONLY the bend at the elbow, not the shoulder!
+        q_relative = quaternion_multiply(
+            quaternion_conjugate(q_shoulder_cal), q_elbow_cal)
+
+        roll, pitch, yaw = quaternion_to_euler(*q_relative)
+
+        lo, hi = LIMITS['elbow_flexion_joint']
+        self.target_joints[3] = clamp(pitch, lo, hi)
+
+        lo, hi = LIMITS['forearm_rotation_joint']
+        self.target_joints[4] = clamp(yaw, lo, hi)
+
+    # ──────────────────────────────────────────────────────────────
+    def publish_joint_states(self):
+        """Apply dead zone, adaptive EMA smoothing, and publish."""
+
+        now = time.time()
+        dt = now - self.last_publish_time
+        self.last_publish_time = now
+
+        for i in range(5):
+            diff = self.target_joints[i] - self.smooth_joints[i]
+
+            # Dead-zone: if movement is smaller than threshold, ignore it
+            if abs(diff) > DEAD_ZONE_RAD:
+                # Adaptive alpha: more smoothing when still, less when moving
+                velocity = abs(diff) / max(dt, 0.001)
+                alpha = EMA_ALPHA_MIN + (EMA_ALPHA_MAX - EMA_ALPHA_MIN) * min(
+                    velocity / VELOCITY_THRESHOLD, 1.0)
+                self.smooth_joints[i] += alpha * diff
+
+        msg = JointState()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.name = self.joint_names
+        msg.position = list(self.smooth_joints)
+        msg.velocity = [0.0] * 5
+        msg.effort   = [0.0] * 5
         self.pub_joints.publish(msg)
 
+        # FK wrist position
+        wx, wy, wz = compute_wrist_position(*self.smooth_joints)
+        wrist_msg = PointStamped()
+        wrist_msg.header.stamp = msg.header.stamp
+        wrist_msg.header.frame_id = 'base_link'
+        wrist_msg.point.x = wx
+        wrist_msg.point.y = wy
+        wrist_msg.point.z = wz
+        self.pub_wrist.publish(wrist_msg)
 
-# ─────────────────────────────────────────────────────────────────
+        # Log every ~2s
+        self.fk_log_counter += 1
+        if self.fk_log_counter >= 200:
+            self.fk_log_counter = 0
+            self.get_logger().info(
+                f'Wrist: ({wx:.3f}, {wy:.3f}, {wz:.3f})  |  '
+                f'abd={math.degrees(self.smooth_joints[0]):.1f}° '
+                f'flex={math.degrees(self.smooth_joints[1]):.1f}° '
+                f'rot={math.degrees(self.smooth_joints[2]):.1f}° '
+                f'elb={math.degrees(self.smooth_joints[3]):.1f}° '
+                f'fore={math.degrees(self.smooth_joints[4]):.1f}°'
+            )
+
+
 def main(args=None):
     rclpy.init(args=args)
     node = ImuToJointAnglesV2()

@@ -1,0 +1,45 @@
+# ═══════════════════════════════════════════════════════════════
+# IMU Arm Mimic System — Configuration File
+# Phase 1: IMU-Only Foundation
+# ═══════════════════════════════════════════════════════════════
+# All tunable parameters in one place. Change values here
+# instead of editing Python source code.
+#
+# Usage: Pass via launch file or --ros-args -p parameter:=value
+# ═══════════════════════════════════════════════════════════════
+
+# ── Serial Bridge Parameters ──────────────────────────────────
+imu_bridge:
+  ros__parameters:
+    port: "/dev/ttyUSB0"
+    baudrate: 115200
+
+# ── Joint Angle Computation ──────────────────────────────────
+# These parameters tune the motion quality:
+#   warmup_time_sec   — how long to let Madgwick filter converge
+#   calibration_samples — number of quaternion samples averaged
+#   ema_alpha_min     — smoothing factor when arm is still (0=frozen, 1=raw)
+#   ema_alpha_max     — smoothing factor when arm is moving fast
+#   dead_zone_deg     — ignore movements smaller than this (kills jitter)
+#   velocity_threshold — angular velocity (rad/s) at which alpha reaches max
+joint_angles:
+  ros__parameters:
+    warmup_time_sec: 7.0
+    calibration_samples: 100
+    ema_alpha_min: 0.15
+    ema_alpha_max: 0.60
+    dead_zone_deg: 1.5
+    velocity_threshold: 2.0
+
+# ── TF Broadcaster (Debug) ───────────────────────────────────
+tf_broadcaster:
+  ros__parameters:
+    enabled: true
+    shoulder_debug_offset_x: 0.3
+    elbow_debug_offset_x: 0.3
+
+# ── Arm Geometry (meters) ────────────────────────────────────
+# Measure YOUR arm and update these for accurate FK
+arm_geometry:
+  upper_arm_length: 0.28
+  forearm_length: 0.26

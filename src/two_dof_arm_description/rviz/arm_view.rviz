@@ -23,6 +23,7 @@ Visualization Manager:
       Color: 160; 160; 164
       Enabled: true
       Name: Grid
+
     - Class: rviz_default_plugins/RobotModel
       Description Topic:
         Depth: 5
@@ -33,6 +34,7 @@ Visualization Manager:
       Enabled: true
       Name: RobotModel
       Visual Enabled: true
+
     - Class: rviz_default_plugins/TF
       Enabled: true
       Frame Timeout: 15
@@ -42,10 +44,23 @@ Visualization Manager:
       Show Arrows: true
       Show Axes: true
       Show Names: true
+
+    - Class: rviz_default_plugins/PointStamped
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /wrist_position
+      Color: 255; 50; 50
+      Enabled: true
+      Name: WristPosition
+      Radius: 0.015
+
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
-    Fixed Frame: base_link
+    Fixed Frame: world
     Frame Rate: 30
   Name: root
   Tools:
@@ -53,12 +68,12 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 1.5
+      Distance: 1.8
       Focal Point:
         X: 0
         Y: 0
-        Z: 0.3
+        Z: 1.1
       Name: Current View
-      Pitch: 0.6
-      Yaw: 0.8
+      Pitch: 0.35
+      Yaw: 2.2
     Saved: ~

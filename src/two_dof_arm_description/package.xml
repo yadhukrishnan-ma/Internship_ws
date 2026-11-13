@@ -2,35 +2,34 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
 
-  <!--
-    WHAT IS THIS FILE?
-    package.xml tells ROS2 what your package is called,
-    who made it, and what other packages it depends on.
-    Think of it like a "requirements.txt" for your robot package.
-  -->
-
-  <!-- The name MUST match your folder name exactly -->
   <name>two_dof_arm_description</name>
 
-  <version>1.0.0</version>
-  <description>2-DOF robotic arm URDF with IMU sensors for ROS2 RViz and Gazebo</description>
+  <version>2.1.0</version>
+  <description>5-DOF robotic arm URDF with dual-IMU motion mimicking for ROS2 RViz</description>
 
-  <!-- Change this to your name and email -->
   <maintainer email="yadhukrishnan.ma.2005@gmail.com">dell</maintainer>
   <license>Apache-2.0</license>
 
   <!-- Build tool for Python-based ROS2 packages -->
   <buildtool_depend>ament_python</buildtool_depend>
 
-  <!-- These are the ROS2 packages your project needs to run -->
+  <!-- Core ROS2 dependencies -->
   <exec_depend>rclpy</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
   <exec_depend>joint_state_publisher</exec_depend>
   <exec_depend>joint_state_publisher_gui</exec_depend>
   <exec_depend>rviz2</exec_depend>
   <exec_depend>xacro</exec_depend>
+
+  <!-- Message types used by our nodes -->
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>std_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+
+  <!-- TF2 for IMU debug TF broadcaster -->
+  <exec_depend>tf2_ros</exec_depend>
+
+  <!-- URDF and launch infrastructure -->
   <exec_depend>urdf</exec_depend>
   <exec_depend>launch_ros</exec_depend>
 

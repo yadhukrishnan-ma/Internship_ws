@@ -1,17 +1,12 @@
 """
 setup.py
-────────────────────────────────────────────────
-Updated for BOTH models:
-• 2-DOF arm
-• 5-DOF human arm
+────────────────────────────────────────────
+Phase 1: IMU-Only Arm Mimicking System
 
-Supports:
-- two_dof_arm.urdf
-- human_arm_5dof.urdf
-- display.launch.py
-- display_5dof.launch.py
-- imu_to_joint_angles
-- imu_to_joint_angles_v2
+Nodes:
+  - serial_imu_bridge      : ESP32 serial → ROS2 Imu messages
+  - imu_to_joint_angles_v2 : IMU quaternions → URDF joint angles
+  - imu_tf_broadcaster     : Raw IMU orientation → TF frames (debug)
 """
 
 from setuptools import setup
@@ -22,7 +17,7 @@ package_name = 'two_dof_arm_description'
 
 setup(
     name=package_name,
-    version='2.0.0',   # Updated version
+    version='2.1.0',
 
     packages=[package_name],
 
@@ -47,6 +42,10 @@ setup(
         # Install RViz configurations
         (os.path.join('share', package_name, 'rviz'),
             glob(os.path.join('rviz', '*.rviz'))),
+
+        # Install config files
+        (os.path.join('share', package_name, 'config'),
+            glob(os.path.join('config', '*.yaml'))),
     ],
 
     install_requires=['setuptools'],
@@ -55,7 +54,7 @@ setup(
     maintainer='dell',
     maintainer_email='yadhukrishnan.ma.2005@gmail.com',
 
-    description=' 5-DOF robotic arm URDF with IMU sensor integration',
+    description='5-DOF robotic arm URDF with dual-IMU motion mimicking',
 
     license='Apache-2.0',
 
@@ -65,14 +64,14 @@ setup(
     entry_points={
         'console_scripts': [
 
-            # Original node (2-DOF)
-            'imu_to_joint_angles = two_dof_arm_description.imu_to_joint_angles:main',
+            # Serial bridge: ESP32 → ROS2 Imu messages
+            'serial_imu_bridge = two_dof_arm_description.serial_imu_bridge:main',
 
-            # New node for 5-DOF arm
+            # Kinematics: IMU quaternions → joint angles
             'imu_to_joint_angles_v2 = two_dof_arm_description.imu_to_joint_angles_v2:main',
 
-            # Serial bridge for ESP32 raw output
-            'serial_imu_bridge = two_dof_arm_description.serial_imu_bridge:main',
+            # TF debug: raw IMU orientations visible in RViz
+            'imu_tf_broadcaster = two_dof_arm_description.imu_tf_broadcaster:main',
 
         ],
     },

@@ -1,0 +1,31 @@
+# ═══════════════════════════════════════════════════════════════
+# ArUco Pose Publisher — Configuration
+#
+# Camera calibration from user's laptop webcam calibration
+# (error: 0.1165 — Excellent!)
+# ═══════════════════════════════════════════════════════════════
+
+aruco_pose_publisher:
+  ros__parameters:
+
+    # ── Camera ────────────────────────────────────────────────
+    camera_index: 0                    # /dev/video0 (laptop webcam)
+
+    # ── ArUco Marker Settings ─────────────────────────────────
+    # Dictionary: DICT_5X5_50 (confirmed working)
+    # Marker IDs:
+    #   ID 5 → upper_arm_link (near imu_shoulder_link)
+    #   ID 9 → forearm_link   (near imu_elbow_link)
+    marker_size: 0.037                 # meters (verified at 30cm)
+
+    # ── Camera Calibration Files ──────────────────────────────
+    # These are loaded from .npy files you already calibrated
+    # If paths are empty, hardcoded values from your calibration are used
+    camera_matrix_path: ""
+    dist_coeffs_path: ""
+
+    # ── Performance ───────────────────────────────────────────
+    publish_rate: 30.0                 # Hz (matches typical webcam FPS)
+
+    # ── Debug ─────────────────────────────────────────────────
+    show_preview: true                 # Show OpenCV preview window

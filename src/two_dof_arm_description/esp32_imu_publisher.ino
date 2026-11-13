@@ -1,92 +1,154 @@
 #include <Wire.h>
 #include <FastIMU.h>
 
-TwoWire I2C_0 = TwoWire(0);
-TwoWire I2C_1 = TwoWire(1);
+// Trick to expose private variables (q0, q1, q2, q3) in the library
+#define private public
+#include <MadgwickAHRS.h>
+#undef private
 
-MPU6500 imu1(I2C_0);
-MPU6500 imu2(I2C_1);
+MPU6500 imu1;
+MPU6500 imu2;
 
-calData calib1 = { 0 };
-calData calib2 = { 0 };
+Madgwick filter1;
+Madgwick filter2;
 
 AccelData accel1, accel2;
-GyroData gyro1, gyro2;
+GyroData  gyro1,  gyro2;
 
-const unsigned long PERIOD_US = 10000;
-unsigned long lastTime = 0;
+// ── Gyro bias offsets (computed at startup) ──────────────────────
+float gx_off1 = 0, gy_off1 = 0, gz_off1 = 0;
+float gx_off2 = 0, gy_off2 = 0, gz_off2 = 0;
 
-float q1_w = 1, q1_x = 0, q1_y = 0, q1_z = 0;
-float q2_w = 1, q2_x = 0, q2_y = 0, q2_z = 0;
-const float beta = 0.1f;
-const float dt = 0.01f;
+// ── Timing for accurate sample rate ─────────────────────────────
+unsigned long lastMicros = 0;
+float actualFreq = 200.0;
 
-void madgwick(float ax, float ay, float az,
-              float gx, float gy, float gz,
-              float &qw, float &qx, float &qy, float &qz) {
-  float norm = sqrt(ax*ax + ay*ay + az*az);
-  if (norm == 0.0f) return;
-  ax /= norm; ay /= norm; az /= norm;
+// ── Packet sequencing for drop detection ────────────────────────
+uint32_t seqNum = 0;
 
-  gx *= DEG_TO_RAD; gy *= DEG_TO_RAD; gz *= DEG_TO_RAD;
-
-  float f1 = 2.0f*(qx*qz - qw*qy) - ax;
-  float f2 = 2.0f*(qw*qx + qy*qz) - ay;
-  float f3 = 1.0f - 2.0f*(qx*qx + qy*qy) - az;
-
-  float grad_w = -2.0f*qy*f1 + 2.0f*qx*f2;
-  float grad_x =  2.0f*qz*f1 + 2.0f*qw*f2 - 4.0f*qx*f3;
-  float grad_y = -2.0f*qw*f1 + 2.0f*qz*f2 - 4.0f*qy*f3;
-  float grad_z =  2.0f*qx*f1 + 2.0f*qy*f2;
-
-  norm = sqrt(grad_w*grad_w + grad_x*grad_x + grad_y*grad_y + grad_z*grad_z);
-  if (norm == 0.0f) return;
-  grad_w /= norm; grad_x /= norm; grad_y /= norm; grad_z /= norm;
-
-  float qdot_w = 0.5f*(-qx*gx - qy*gy - qz*gz) - beta*grad_w;
-  float qdot_x = 0.5f*( qw*gx + qy*gz - qz*gy) - beta*grad_x;
-  float qdot_y = 0.5f*( qw*gy - qx*gz + qz*gx) - beta*grad_y;
-  float qdot_z = 0.5f*( qw*gz + qx*gy - qy*gx) - beta*grad_z;
-
-  qw += qdot_w * dt;
-  qx += qdot_x * dt;
-  qy += qdot_y * dt;
-  qz += qdot_z * dt;
-
-  norm = sqrt(qw*qw + qx*qx + qy*qy + qz*qz);
-  qw /= norm; qx /= norm; qy /= norm; qz /= norm;
-}
+// ── Calibration parameters ──────────────────────────────────────
+const int CAL_SAMPLES = 1000;       // 4 seconds at 250Hz for better gyro bias
+const float ACCEL_MAG_MIN = 0.85;   // g — reject if sensor moved during cal
+const float ACCEL_MAG_MAX = 1.15;   // g — reject if sensor moved during cal
 
 void setup() {
-  Serial.begin(921600);
-  delay(2000);
+  Serial.begin(115200);
+  Wire.begin();
+  Wire.setClock(400000);  // 400kHz I2C for faster reads
 
-  I2C_0.begin(22, 21, 400000);
-  I2C_1.begin(19, 18, 400000);
+  calData cal = {};
+
+  int err1 = imu1.init(cal, 0x68);
+  int err2 = imu2.init(cal, 0x69);
+
+  if (err1 != 0) Serial.println("IMU1 FAILED");
+  else           Serial.println("IMU1 OK");
+
+  if (err2 != 0) Serial.println("IMU2 FAILED");
+  else           Serial.println("IMU2 OK");
+
   delay(500);
 
-  int err1 = imu1.init(calib1, 0x68);
-  if (err1 != 0) { Serial.printf("ERR:IMU1 %d\n", err1); while(1); }
-  Serial.println("IMU1 OK");
+  // ── Gyro Calibration: measure zero-rate bias ──────────────────
+  // Keep the sensors STILL during this phase!
+  Serial.println("CALIBRATING... Keep sensors still!");
+  float sx1 = 0, sy1 = 0, sz1 = 0;
+  float sx2 = 0, sy2 = 0, sz2 = 0;
+  int validSamples = 0;
+  int rejectedSamples = 0;
 
-  int err2 = imu2.init(calib2, 0x68);
-  if (err2 != 0) { Serial.printf("ERR:IMU2 %d\n", err2); while(1); }
-  Serial.println("IMU2 OK");
+  for (int i = 0; i < CAL_SAMPLES; i++) {
+    imu1.update();
+    imu2.update();
+    imu1.getAccel(&accel1);
+    imu1.getGyro(&gyro1);
+    imu2.getAccel(&accel2);
+    imu2.getGyro(&gyro2);
 
-  Serial.println("INFO:CALIBRATING - keep still");
-  delay(3000);
-  imu1.calibrateAccelGyro(&calib1);
-  imu2.calibrateAccelGyro(&calib2);
-  imu1.init(calib1, 0x68);
-  imu2.init(calib2, 0x68);
+    // Check accelerometer magnitude — should be ~1g if stationary
+    float mag1 = sqrt(accel1.accelX*accel1.accelX +
+                      accel1.accelY*accel1.accelY +
+                      accel1.accelZ*accel1.accelZ);
+    float mag2 = sqrt(accel2.accelX*accel2.accelX +
+                      accel2.accelY*accel2.accelY +
+                      accel2.accelZ*accel2.accelZ);
 
-  Serial.println("INFO:READY");
+    if (mag1 >= ACCEL_MAG_MIN && mag1 <= ACCEL_MAG_MAX &&
+        mag2 >= ACCEL_MAG_MIN && mag2 <= ACCEL_MAG_MAX) {
+      sx1 += gyro1.gyroX;  sy1 += gyro1.gyroY;  sz1 += gyro1.gyroZ;
+      sx2 += gyro2.gyroX;  sy2 += gyro2.gyroY;  sz2 += gyro2.gyroZ;
+      validSamples++;
+    } else {
+      rejectedSamples++;
+    }
+    delay(4);
+  }
+
+  if (validSamples < 200) {
+    Serial.println("WARNING: Too few valid calibration samples! Keep sensors STILL!");
+    Serial.printf("Valid: %d, Rejected: %d\n", validSamples, rejectedSamples);
+    // Use whatever we got
+    if (validSamples == 0) validSamples = 1;  // prevent div by zero
+  }
+
+  gx_off1 = sx1 / validSamples;
+  gy_off1 = sy1 / validSamples;
+  gz_off1 = sz1 / validSamples;
+  gx_off2 = sx2 / validSamples;
+  gy_off2 = sy2 / validSamples;
+  gz_off2 = sz2 / validSamples;
+
+  Serial.printf("CAL DONE (%d valid, %d rejected)\n", validSamples, rejectedSamples);
+  Serial.printf("  gyro1_bias=(%.3f,%.3f,%.3f)\n", gx_off1, gy_off1, gz_off1);
+  Serial.printf("  gyro2_bias=(%.3f,%.3f,%.3f)\n", gx_off2, gy_off2, gz_off2);
+
+  // ── Start Madgwick filters ────────────────────────────────────
+  filter1.begin(200);
+  filter2.begin(200);
+
+  // Let the Madgwick filter converge for 2 seconds before sending data
+  Serial.println("CONVERGING... Madgwick filter warming up (2s)");
+  unsigned long convergeStart = millis();
+  while (millis() - convergeStart < 2000) {
+    imu1.update();
+    imu2.update();
+    imu1.getAccel(&accel1);
+    imu1.getGyro(&gyro1);
+    imu2.getAccel(&accel2);
+    imu2.getGyro(&gyro2);
+
+    float gx1 = gyro1.gyroX - gx_off1;
+    float gy1 = gyro1.gyroY - gy_off1;
+    float gz1 = gyro1.gyroZ - gz_off1;
+    float gx2 = gyro2.gyroX - gx_off2;
+    float gy2 = gyro2.gyroY - gy_off2;
+    float gz2 = gyro2.gyroZ - gz_off2;
+
+    filter1.updateIMU(gx1, gy1, gz1,
+      accel1.accelX, accel1.accelY, accel1.accelZ);
+    filter2.updateIMU(gx2, gy2, gz2,
+      accel2.accelX, accel2.accelY, accel2.accelZ);
+    delay(4);
+  }
+
+  lastMicros = micros();
+  seqNum = 0;
+
+  // ── Signal readiness to ROS2 bridge ───────────────────────────
+  Serial.println("READY");
+  delay(100);
 }
 
 void loop() {
+  // ── Measure actual loop time for accurate Madgwick ─────────────
   unsigned long now = micros();
-  if (now - lastTime < PERIOD_US) return;
-  lastTime = now;
+  float dt = (now - lastMicros) / 1000000.0f;
+  lastMicros = now;
+
+  // Update Madgwick sample rate dynamically (clamp to reasonable range)
+  if (dt > 0.001f && dt < 0.05f) {
+    actualFreq = 1.0f / dt;
+  }
 
   imu1.update();
   imu2.update();
@@ -96,15 +158,34 @@ void loop() {
   imu2.getAccel(&accel2);
   imu2.getGyro(&gyro2);
 
-  madgwick(accel1.accelX, accel1.accelY, accel1.accelZ,
-           gyro1.gyroX, gyro1.gyroY, gyro1.gyroZ,
-           q1_w, q1_x, q1_y, q1_z);
+  // ── Subtract gyro bias ────────────────────────────────────────
+  float gx1 = gyro1.gyroX - gx_off1;
+  float gy1 = gyro1.gyroY - gy_off1;
+  float gz1 = gyro1.gyroZ - gz_off1;
+  float gx2 = gyro2.gyroX - gx_off2;
+  float gy2 = gyro2.gyroY - gy_off2;
+  float gz2 = gyro2.gyroZ - gz_off2;
 
-  madgwick(accel2.accelX, accel2.accelY, accel2.accelZ,
-           gyro2.gyroX, gyro2.gyroY, gyro2.gyroZ,
-           q2_w, q2_x, q2_y, q2_z);
+  // ── Dynamic Sample Rate for accurate Madgwick integration ─────
+  if (dt > 0.001f && dt < 0.1f) {
+      filter1.invSampleFreq = dt;
+      filter2.invSampleFreq = dt;
+  }
 
-  Serial.printf("%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n",
-    q1_w, q1_x, q1_y, q1_z,
-    q2_w, q2_x, q2_y, q2_z);
+  // ── Update filters with bias-corrected gyro data ──────────────
+  filter1.updateIMU(gx1, gy1, gz1,
+    accel1.accelX, accel1.accelY, accel1.accelZ);
+  filter2.updateIMU(gx2, gy2, gz2,
+    accel2.accelX, accel2.accelY, accel2.accelZ);
+
+  // ── Send: seq, timestamp_us, q1w,q1x,q1y,q1z, q2w,q2x,q2y,q2z ─
+  // 10 fields: enables drop detection + latency measurement on ROS side
+  Serial.printf("%u,%lu,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f\n",
+    seqNum, now,
+    filter1.q0, filter1.q1, filter1.q2, filter1.q3,
+    filter2.q0, filter2.q1, filter2.q2, filter2.q3);
+
+  seqNum++;
+
+  delay(4);  // ~200Hz target (4ms delay + processing time)
 }
